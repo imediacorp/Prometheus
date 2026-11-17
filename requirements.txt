@@ -1,0 +1,20 @@
+# Core graph database
+neo4j>=5.0,<6.0
+
+# LLM + embeddings
+anthropic>=2.0
+openai>=1.0
+
+# API layer
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.0
+
+# ETL / data processing
+pandas>=2.0
+pymupdf>=1.23          # PDF text extraction (fitz)
+pdfplumber>=0.10       # PDF fallback extractor
+
+# Fetchers (stdlib urllib used; no extra deps needed for basic HTTP)
+# Optional: install requests for more robust HTTP in fetchers
+# requests>=2.31

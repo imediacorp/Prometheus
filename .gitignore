@@ -1,0 +1,22 @@
+# Downloaded raw data — never commit to public repo
+data/
+
+# Fetch state (contains timestamps, not sensitive but local)
+.fetch_state.json
+
+# Credentials
+Untitled.txt
+*.env
+.env*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,126 @@
+name: Prometheus Weekly Ingest
+
+on:
+  schedule:
+    # Every Monday at 03:00 UTC
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: 'Comma-separated source list (nuforc,geipan,aaro,fbi_vault,nara,lac,all)'
+        required: false
+        default: 'nuforc,geipan'
+      lookback_days:
+        description: 'Lookback window for the digest report (days)'
+        required: false
+        default: '7'
+      skip_embed:
+        description: 'Skip embedding step (true/false)'
+        required: false
+        default: 'false'
+
+env:
+  NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+  NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+  NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+
+jobs:
+  ingest:
+    name: Fetch → Ingest → Resolve → Embed → Digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Need write access for committing the digest
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # -----------------------------------------------------------------------
+      - name: Determine sources
+        id: sources
+        run: |
+          # On schedule: use defaults. On workflow_dispatch: use input.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "sources=${{ github.event.inputs.sources }}" >> "$GITHUB_OUTPUT"
+            echo "lookback=${{ github.event.inputs.lookback_days }}" >> "$GITHUB_OUTPUT"
+            echo "skip_embed=${{ github.event.inputs.skip_embed }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sources=nuforc,geipan" >> "$GITHUB_OUTPUT"
+            echo "lookback=7" >> "$GITHUB_OUTPUT"
+            echo "skip_embed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # -----------------------------------------------------------------------
+      - name: Fetch and ingest sources
+        run: |
+          python -m fetchers.runner \
+            --sources "${{ steps.sources.outputs.sources }}" \
+            --output-dir data/raw
+        env:
+          NEO4J_URI:        ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:       ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD:   ${{ secrets.NEO4J_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # -----------------------------------------------------------------------
+      - name: Run entity resolution
+        run: python -m etl.ingest resolve
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+
+      # -----------------------------------------------------------------------
+      - name: Generate embeddings
+        if: steps.sources.outputs.skip_embed != 'true'
+        run: python -m etl.ingest embed
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # -----------------------------------------------------------------------
+      - name: Run vector-enhanced entity resolution
+        if: steps.sources.outputs.skip_embed != 'true'
+        run: python -m etl.ingest vector-resolve
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+
+      # -----------------------------------------------------------------------
+      - name: Generate weekly digest
+        run: |
+          python -m reports.digest \
+            --output reports/latest.md \
+            --lookback-days "${{ steps.sources.outputs.lookback }}"
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+
+      # -----------------------------------------------------------------------
+      - name: Commit digest to repository
+        run: |
+          git config user.name  "prometheus-bot"
+          git config user.email "prometheus-bot@users.noreply.github.com"
+          git add reports/latest.md
+          # Exit cleanly if nothing changed (idempotent on re-runs)
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "chore: weekly digest $(date -u +%Y-%m-%d)"
+          git push
